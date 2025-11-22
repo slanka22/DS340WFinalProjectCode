@@ -7,6 +7,7 @@ import subprocess
 import os
 import sys
 import pathlib
+from pathlib import Path
 import yaml
 import cv2
 
@@ -62,7 +63,7 @@ def readData(dreamerMemory):
             }
             dreamerMemory.add(dataInstance)
 
-trainDreamerReplay = replay.Replay("replayBuffer")
+trainDreamerReplay = replay.Replay(Path("replayBuffer"))
 readData(trainDreamerReplay)
 
 #Train Dreamer
