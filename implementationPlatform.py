@@ -6,34 +6,46 @@ import subprocess
 
 import os
 import sys
+import pathlib
 from pathlib import Path
 import yaml
 import cv2
 
-sys.path.append("C:\\Users\\Slank\\OneDrive\\Desktop\\TrafficDojo\\TrafficDojo\\dreamerV2-pytorch")
-sys.path.append("C:\\Users\\Slank\\OneDrive\\Desktop\\TrafficDojo\\TrafficDojo\\dreamerV2-pytorch\\common")
-sys.path.append("C:\\Users\\Slank\\OneDrive\\Desktop\\TrafficDojo\\TrafficDojo\\dreamerV2-pytorch\\dreamerv2")
+# Addressing Issue where sys.path.insert for these libraries did not work as intended and still caused errors where the wrong package was imported:  https://stackoverflow.com/questions/16114391/adding-directory-to-sys-path-pythonpath?utm_source=chatgpt.com
+sys.path.insert(0, "./dreamerV2-pytorch")
+sys.path.insert(0, "./dreamerV2-pytorch/common")
+sys.path.insert(0, "./dreamerV2-pytorch/dreamerv2")
 from common import replay
-from dreamerv2.agent import Agent
+from agent import Agent
 from meta_traffic.metatraffic_env.traffic_signal_env import MetaSUMOEnv
 from meta_traffic.metatraffic_env.observation import TopDownObservation
 
-#Run Data Generation
-subprocess.run([
-    "python",
-    "world_models\\data\\generation_script.py",
-    "--rollouts", "200",
-    "--threads", "4",
-    "--rootdir", "data\\generatedData",
-    "--policy", "brown"
-])
+# Run VisionDQN
+# subprocess.run([
+#     "python",
+#     "./experiments/vision_dqn.py",
+#     "./nets/RESCO/cologne1/cologne1.sumocfg",
+#     "cologne1_bev",
+#     "-s", "6000",
+#     "-begin_time", "25200",
+#     "-bev",
+#     "-z", "100"
+# ])
+#
+# Run Data Generation
+# subprocess.run([
+#     "python",
+#     "world_models/data/generation_script.py",
+#     "--rollouts", "200",
+#     "--threads", "4",
+#     "--rootdir", "data/generatedData",
+#     "--policy", "brown"
+# ])
 
 #Read TrafficDojo Data Generation
 def readData(dreamerMemory):
-    for i in range(4):
-        threadFolder = "thread_" + str(i)
-        currentFolder = os.path.join(".\\data\\generatedData\\", threadFolder)
-
+    for threadFolder in ["thread_0", "thread_1", "thread_2", "thread_3"]:
+        currentFolder = os.path.join("./data/generatedData/", threadFolder)
         for dataFile in os.listdir(currentFolder):
             data = np.load(os.path.join(currentFolder, dataFile), mmap_mode="r")
 
@@ -55,13 +67,13 @@ def readData(dreamerMemory):
 trainDreamerReplay = replay.Replay(Path("replayBuffer"))
 readData(trainDreamerReplay)
 
-#Train Dreamer
+# #Train Dreamer
 class emptyEnv:
     def __init__(self, n): self.n = n
 
 modelSpace = emptyEnv(4)
 
-with open("C:\\Users\\Slank\\OneDrive\\Desktop\\TrafficDojo\\TrafficDojo\\dreamerV2-pytorch\\dreamerv2\\configs.yaml", "r") as f:
+with open(r"./dreamerV2-pytorch/dreamerv2/configs.yaml", "r") as f:
     dreamerConfig = yaml.load(f, Loader=yaml.FullLoader)["defaults"]
 
 class configToDreamerExpectation(dict):
@@ -81,19 +93,20 @@ dataLoader = trainDreamerReplay.dataset(
     oversample_ends=False,
 )
 dreanerDataset = iter(dataLoader)
+
 for i in range(50000):
     currentBatch = next(dreanerDataset)
     for key in list(currentBatch.keys()):
         currentBatch[key] = torch.as_tensor(currentBatch[key], device=dreamerConfig.device)
 
     currentBatch["image"] = currentBatch["image"].permute(0, 1, 3, 2, 4).contiguous()
-    torch.xpu.synchronize()
+    #torch.xpu.synchronize() #Disabled for Non Intel GPUs
 
     trainOutput, metricsOutput = dreamerTrainer.train(currentBatch)
 
 torch.save(dreamerTrainer.state_dict(), "FinalDreamerV2Model.pth")
 
-#Evaluate Dreamer
+# Evaluate Dreamer
 device = dreamerConfig.device
 
 dreamerModel = Agent(dreamerConfig, logger=None, actspce=modelSpace, step=None).to(device)
@@ -112,7 +125,7 @@ env = MetaSUMOEnv(
         window_size=(256, 256),
         stack_size=1,
         min_green=10,
-        sumo_cfg_file="C:\\Users\\Slank\\OneDrive\\Desktop\\TrafficDojo\\TrafficDojo\\nets\\RESCO\\cologne1\\cologne1.sumocfg",
+        sumo_cfg_file=r"./nets/RESCO/cologne1/cologne1.sumocfg",
         sumo_gui=False,
         capture_all_at_once=True,
         vision_feature=True,
@@ -124,8 +137,8 @@ env = MetaSUMOEnv(
     out_csv_name="dreamerEvalvuationOutput",
 )
 
-def preprocessImages(sumoImage):
-    trafficImage = np.squeeze(sumoImage["image"])
+def preprocessImages(observation):
+    trafficImage = np.squeeze(observation["image"])
 
     if trafficImage.ndim == 3:
         trafficImage = cv2.cvtColor(trafficImage, cv2.COLOR_BGR2GRAY)
@@ -133,8 +146,8 @@ def preprocessImages(sumoImage):
     trafficImage = cv2.resize(trafficImage, (64, 64))
     return {"image": trafficImage[:, :, None]}
 
-sumoImages, sumoOutputs = env.reset()
-processedImage = preprocessImages(sumoImages)
+dreanerObservations, dreamerInfo = env.reset()
+processedImage = preprocessImages(dreanerObservations)
 
 currentDreamerStep = 0
 
@@ -144,10 +157,9 @@ def evalDreamer(processedObservations, agentState):
     processedImage = processedObservations["image"].astype(np.float32) / 255.0
     processedImage = torch.from_numpy(processedImage.transpose(2, 0, 1)[None]).to(device)
 
-    resetCondition = 1.0 if currentDreamerStep == 0 else 0.0
     dreamerInputs = {
         "image": processedImage,
-        "reset": torch.tensor([[resetCondition]], device=device),
+        "reset": torch.tensor([[1.0 if currentDreamerStep == 0 else 0.0]], device=device),
         "reward": torch.zeros((1, 1), device=device),
         "discount": torch.ones((1, 1), device=device),
         "action": torch.zeros((1, 4), device=device)
@@ -168,7 +180,8 @@ while True:
     rawObservation, reward, terminated, truncated, info = env.step(dreamerAction)
     processedImage = preprocessImages(rawObservation)
 
-    metricList.append(info)
+    if "metrics" in info:
+        metricList.append(info["metrics"])
 
     if terminated or truncated:
         break

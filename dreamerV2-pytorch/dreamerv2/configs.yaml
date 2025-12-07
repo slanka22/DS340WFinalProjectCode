@@ -17,7 +17,7 @@ defaults:
   dataset: {batch: 50, length: 50, oversample_ends: True}
   precision: 16
   jit: True
-  device: 'xpu' #Intel GPU Modification
+  device: 'cpu' #Intel GPU Modification
   load: 'all'
 
   # Agent
